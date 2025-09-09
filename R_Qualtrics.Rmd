@@ -1,0 +1,137 @@
+---
+title: "R_Qualtircs"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(officer)
+library(fs)
+```
+
+```{r configuration}
+output_doc <- "C:/Users/deeks/Desktop/R_Qualtircs/NERAC_Review_Summary.docx"
+
+score_columns <- c("Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7")
+comment_column <- "Q8"
+
+question_titles <- c(
+  Q1 = "Overall quality of the project outline",
+  Q2 = "Benefits to the NCR region and industry",
+  Q3 = "Likelihood of project success",
+  Q4 = "Quality of project objectives",
+  Q5 = "Outreach and Evaluation Plan",
+  Q6 = "Appropriateness of budget",
+  Q7 = "Qualification of investigators"
+)
+
+question_max_scores <- c(Q1 = 10, Q2 = 20, Q3 = 10, Q4 = 30, Q5 = 10, Q6 = 10, Q7 = 10)
+```
+
+```{r read-csvs}
+read_qualtrics_csvs <- function(folder_path) {
+  csv_files <- dir_ls(folder_path, glob = "*.csv")
+  df_list <- lapply(csv_files, function(file) {
+    raw <- read_csv(file, skip = 1, show_col_types = FALSE)
+    colnames(raw)[18:25] <- c("Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8")
+
+    title_col <- names(raw)[which.max(sapply(raw, function(col) sum(str_detect(as.character(col), "^\\d+$"))))]
+    raw <- raw |> rename(project_id = all_of(title_col))
+
+    raw |> mutate(source_file = path_file(file))
+  })
+  bind_rows(df_list)
+}
+```
+
+```{r plots}
+generate_single_score_plot <- function(actual_score, max_score, q_title) {
+  df <- tibble(score = 1:max_score) |>
+    mutate(bar = if_else(score == actual_score, 1L, 0L))
+
+  ggplot(df, aes(x = factor(score), y = bar)) +
+    geom_col(fill = if_else(df$bar == 1, "#4c78a8", "gray80"), width = 0.8, color = "black") +
+    labs(
+      title = q_title,
+      x = paste0("Score (1–", max_score, ")"),
+      y = "Count"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(size = 10),
+      axis.text.y = element_text(size = 8),
+      axis.ticks.y = element_blank(),
+      axis.text.x = element_text(size = 8)
+    )
+}
+```
+
+```{r docgen}
+generate_word_report <- function(df, output_file) {
+  doc <- read_docx()
+  doc <- body_add_par(doc, "NERAC Review Summary", style = "heading 1")
+
+  valid_df <- df |> filter(!is.na(project_id)) |>
+    filter(!str_detect(project_id, "ImportId|\\{"))
+
+  for (pid in unique(valid_df$project_id)) {
+    section_data <- valid_df |> filter(as.character(project_id) == as.character(pid))
+    doc <- body_add_par(doc, paste("Title", pid), style = "heading 2")
+    doc <- body_add_par(doc, paste("Number of reviewers:", nrow(section_data)), style = "Normal")
+
+    for (i in 1:nrow(section_data)) {
+      reviewer <- section_data[i, ]
+      doc <- body_add_par(doc, paste("Reviewer", i), style = "heading 3")
+
+      for (qid in score_columns) {
+        score <- suppressWarnings(as.numeric(reviewer[[qid]]))
+        if (!is.na(score)) {
+          q_title <- question_titles[[qid]]
+          max_score <- question_max_scores[[qid]]
+          plot <- generate_single_score_plot(score, max_score, q_title)
+
+          tmpfile <- tempfile(fileext = ".png")
+          ggsave(tmpfile, plot = plot, width = 4, height = 3, dpi = 150)
+          doc <- body_add_img(doc, src = tmpfile, width = 4, height = 3)
+        }
+      }
+    }
+
+    comments <- section_data[[comment_column]] |>
+      as.character() |>
+      discard(~ .x == "" | str_detect(.x, "ImportId|\\{")) |>
+      unique()
+
+    doc <- body_add_par(doc, "Reviewer Comments", style = "heading 3")
+    if (length(comments) > 0) {
+      for (i in seq_along(comments)) {
+        doc <- body_add_par(doc, paste(i, ".", comments[[i]]), style = "Normal")
+      }
+    } else {
+      doc <- body_add_par(doc, "No comments provided for this title.", style = "Normal")
+    }
+
+    doc <- body_add_break(doc)
+  }
+  print(doc, target = output_file)
+  message("✅ Word report generated: ", output_file)
+}
+```
+
+```{r run-final, eval=TRUE} 
+
+# Ask user to pick a CSV file 
+file_path <- rstudioapi::selectFile(
+  caption = "Choose a Qualtrics CSV file",
+  filter = "CSV Files (*.csv)"
+)
+
+
+# Extract folder containing the file 
+folder_path <- dirname(file_path) 
+
+# Process and generate report 
+df <- read_qualtrics_csvs(folder_path) 
+generate_word_report(df, output_doc)
